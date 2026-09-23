@@ -7,19 +7,27 @@ const processButton = document.getElementById("process");
 const error = document.getElementById("file-error");
 const status = document.getElementById("processing-status");
 let recording = null;
+let processing = false;
+const transcriptText = document.getElementById("transcript-text");
+const transcriptEmpty = document.getElementById("transcript-empty");
 
 function resetSelection() {
+  if (processing) return;
   recording = null;
   input.value = "";
   selectedFile.hidden = true;
   processButton.disabled = true;
   status.hidden = true;
   error.hidden = true;
+  transcriptText.textContent = "";
+  transcriptText.hidden = true;
+  transcriptEmpty.hidden = false;
   document.getElementById("file-name").textContent = "";
   document.getElementById("file-size").textContent = "";
 }
 
 function selectFile(files) {
+  if (processing) return;
   resetSelection();
   if (files.length !== 1) {
     error.textContent = "Выберите одну запись совещания.";
@@ -27,8 +35,8 @@ function selectFile(files) {
     return;
   }
   const file = files[0];
-  if (!/\.(mp3|wav|m4a|mp4)$/i.test(file.name) || file.size === 0) {
-    error.textContent = "Выберите непустой файл в формате MP3, WAV, M4A или MP4.";
+  if (!/\.(mp3|wav|m4a)$/i.test(file.name) || file.size === 0) {
+    error.textContent = "Выберите непустой файл в формате MP3, WAV или M4A.";
     error.hidden = false;
     return;
   }
@@ -47,7 +55,7 @@ document.getElementById("remove-file").addEventListener("click", () => {
   resetSelection();
   input.focus();
 });
-// Files stay in browser memory: no upload, storage, or external requests.
+// Upload only to the same local FastAPI server.
 window.addEventListener("dragover", (event) => event.preventDefault());
 window.addEventListener("drop", (event) => event.preventDefault());
 dropZone.addEventListener("dragover", (event) => {
@@ -62,10 +70,46 @@ dropZone.addEventListener("drop", (event) => {
   dropZone.classList.remove("drag-over");
   selectFile(Array.from(event.dataTransfer.files));
 });
-processButton.addEventListener("click", () => {
-  if (!recording) return;
-  status.textContent = "Запись выбрана. Обработка пока не подключена: это прототип интерфейса. Файл не отправляется на сервер или во внешние сервисы; результаты не создаются.";
+processButton.addEventListener("click", async () => {
+  if (!recording || processing) return;
+  processing = true;
+  processButton.disabled = true;
+  input.disabled = true;
+  document.getElementById("remove-file").disabled = true;
+  error.hidden = true;
+  transcriptText.textContent = "";
+  transcriptText.hidden = true;
+  transcriptEmpty.hidden = false;
+  status.textContent = "Обрабатываем запись...";
   status.hidden = false;
+  try {
+    const form = new FormData();
+    form.append("file", recording);
+    const response = await fetch("/api/transcribe", { method: "POST", body: form });
+    const result = await response.json().catch(() => null);
+    if (!response.ok) {
+      throw new Error(typeof result?.detail === "string" ? result.detail : "Локальный сервер не смог обработать запись. Повторите попытку.");
+    }
+    if (typeof result?.transcript !== "string") {
+      throw new Error("Сервер вернул некорректный результат. Повторите попытку.");
+    }
+    transcriptText.textContent = result.transcript || "Речь в записи не обнаружена.";
+    transcriptText.hidden = false;
+    transcriptEmpty.hidden = true;
+    activateTab(document.getElementById("tab-transcript"));
+    status.textContent = "Обработка завершена.";
+  } catch (exception) {
+    status.hidden = true;
+    error.textContent = exception instanceof TypeError
+      ? "Нет связи с локальным сервером. Убедитесь, что приложение запущено, и повторите попытку."
+      : exception.message;
+    error.hidden = false;
+  } finally {
+    processing = false;
+    processButton.disabled = !recording;
+    input.disabled = false;
+    document.getElementById("remove-file").disabled = false;
+  }
 });
 
 const tabs = Array.from(document.querySelectorAll('[role="tab"]'));

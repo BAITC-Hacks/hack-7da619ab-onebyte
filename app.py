@@ -1,12 +1,75 @@
 from pathlib import Path
+from shutil import copyfileobj
+from tempfile import TemporaryDirectory
+from threading import Lock
 
-from fastapi import FastAPI
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, HTTPException, UploadFile
+from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from faster_whisper import WhisperModel
 
 BASE_DIR = Path(__file__).resolve().parent
 app = FastAPI(title="Meeting AI", docs_url=None, redoc_url=None)
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
+model = None
+model_lock = Lock()
+
+
+@app.post("/api/transcribe")
+def transcribe(file: UploadFile):
+    # A synchronous route runs in FastAPI's thread pool, keeping the UI available.
+    global model
+    try:
+        suffix = Path(file.filename or "").suffix.lower()
+        if suffix not in {".mp3", ".wav", ".m4a"}:
+            raise HTTPException(400, "Выберите файл в формате MP3, WAV или M4A.")
+        with TemporaryDirectory(prefix="meeting-ai-") as directory:
+            audio_path = Path(directory) / f"recording{suffix}"
+            with audio_path.open("wb") as audio:
+                copyfileobj(file.file, audio)
+            if audio_path.stat().st_size == 0:
+                raise HTTPException(400, "Файл пуст. Выберите запись с аудио.")
+            # Serialize CPU inference and initialize the model only once.
+            with model_lock:
+                if model is None:
+                    try:
+                        model = WhisperModel(
+                            "small", device="cpu", compute_type="int8",
+                            local_files_only=True,
+                        )
+                    except Exception as exc:
+                        raise HTTPException(
+                            503,
+                            "Не удалось загрузить локальную модель small. "
+                            "Запустите приложение в окружении, где faster-whisper "
+                            "уже работает и модель сохранена в кэше.",
+                        ) from exc
+                try:
+                    segments, _ = model.transcribe(
+                        str(audio_path), beam_size=5, vad_filter=True,
+                    )
+                    # Inference is lazy: consume all segments before deleting audio.
+                    transcript = "\n".join(
+                        segment.text.strip() for segment in segments
+                        if segment.text.strip()
+                    )
+                except Exception as exc:
+                    raise HTTPException(
+                        422,
+                        "Не удалось распознать запись. Проверьте, что файл "
+                        "не повреждён и содержит аудио, затем повторите попытку.",
+                    ) from exc
+        return JSONResponse(
+            {"transcript": transcript}, headers={"Cache-Control": "no-store"},
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            500, "Не удалось обработать файл на локальном сервере. Повторите попытку.",
+        ) from exc
+    finally:
+        file.file.close()
 
 
 @app.get("/", response_class=FileResponse)
