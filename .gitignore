@@ -26,3 +26,8 @@ outputs/
 .vscode/
 .DS_Store
 Thumbs.db
+# Записи совещаний — не отправлять в GitHub
+*.mp3
+*.wav
+*.m4a
+*.mp4

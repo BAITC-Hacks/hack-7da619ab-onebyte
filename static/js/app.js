@@ -10,9 +10,100 @@ let recording = null;
 let processing = false;
 const transcriptText = document.getElementById("transcript-text");
 const transcriptEmpty = document.getElementById("transcript-empty");
+const summaryText = document.getElementById("summary-text");
+const summaryEmpty = document.getElementById("summary-empty");
+const tasksBody = document.getElementById("tasks-body");
+const analysisNote = document.getElementById("analysis-note");
+const exportButton = document.getElementById("export-docx");
+const exportStatus = document.getElementById("export-status");
+const retryAnalysis = document.getElementById("retry-analysis");
+let currentTranscript = null;
+let exporting = false;
+
+function emptyTasks(message) {
+  tasksBody.replaceChildren();
+  const row = document.createElement("tr");
+  const cell = document.createElement("td");
+  cell.colSpan = 4;
+  cell.className = "table-empty";
+  cell.textContent = message;
+  row.appendChild(cell);
+  tasksBody.appendChild(row);
+}
+
+function clearAnalysis() {
+  currentTranscript = null;
+  summaryText.textContent = "";
+  summaryText.hidden = true;
+  summaryEmpty.hidden = false;
+  analysisNote.hidden = true;
+  exportButton.disabled = true;
+  retryAnalysis.hidden = true;
+  exportStatus.hidden = true;
+  emptyTasks("Загрузите и обработайте запись, чтобы выделить поручения.");
+}
+
+async function readResponse(response, fallback) {
+  const data = await response.json().catch(() => null);
+  if (!response.ok) throw new Error(typeof data?.detail === "string" ? data.detail : fallback);
+  return data;
+}
+
+async function analyzeCurrentTranscript() {
+  retryAnalysis.hidden = true;
+  status.textContent = "Формируем саммари и поручения...";
+  status.hidden = false;
+  try {
+    const response = await fetch("/api/analyze", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ transcript: currentTranscript }),
+    });
+    const result = await readResponse(response, "Не удалось проанализировать транскрипт.");
+    if (typeof result?.summary !== "string" || !Array.isArray(result?.tasks)) {
+      throw new Error("Сервер вернул некорректный результат анализа.");
+    }
+    summaryText.textContent = result.summary;
+    summaryText.hidden = false;
+    summaryEmpty.hidden = true;
+    tasksBody.replaceChildren();
+    for (const task of result.tasks) {
+      const row = document.createElement("tr");
+      for (const value of [task.assignee || "Не определён", task.description, task.deadline || "Не определён", "В работе"]) {
+        const cell = document.createElement("td");
+        cell.textContent = value;
+        if (value === "Не определён") cell.className = "undetermined";
+        row.appendChild(cell);
+      }
+      tasksBody.appendChild(row);
+    }
+    if (!result.tasks.length) emptyTasks("Явные поручения не найдены. Проверьте полный транскрипт.");
+    analysisNote.textContent = result.analysis_note;
+    analysisNote.hidden = false;
+    exportButton.disabled = exporting;
+    activateTab(document.getElementById("tab-summary"));
+    status.textContent = "Готово: транскрипт, саммари и поручения. Протокол можно скачать в DOCX.";
+  } catch (exception) {
+    summaryText.textContent = "Анализ не завершён. Транскрипт доступен в своей вкладке.";
+    summaryText.hidden = false;
+    summaryEmpty.hidden = true;
+    emptyTasks("Не удалось выделить поручения. Повторите анализ.");
+    status.textContent = "Транскрипт готов. Анализ не выполнен: " + (exception instanceof TypeError ? "нет связи с локальным сервером." : exception.message);
+    retryAnalysis.hidden = false;
+  }
+}
+
+function setProcessing(value) {
+  processing = value;
+  processButton.disabled = value || !recording;
+  input.disabled = value;
+  document.getElementById("remove-file").disabled = value;
+  retryAnalysis.disabled = value;
+}
 
 function resetSelection() {
   if (processing) return;
+  clearAnalysis();
   recording = null;
   input.value = "";
   selectedFile.hidden = true;
@@ -72,10 +163,8 @@ dropZone.addEventListener("drop", (event) => {
 });
 processButton.addEventListener("click", async () => {
   if (!recording || processing) return;
-  processing = true;
-  processButton.disabled = true;
-  input.disabled = true;
-  document.getElementById("remove-file").disabled = true;
+  setProcessing(true);
+  clearAnalysis();
   error.hidden = true;
   transcriptText.textContent = "";
   transcriptText.hidden = true;
@@ -96,8 +185,9 @@ processButton.addEventListener("click", async () => {
     transcriptText.textContent = result.transcript || "Речь в записи не обнаружена.";
     transcriptText.hidden = false;
     transcriptEmpty.hidden = true;
+    currentTranscript = result.transcript;
     activateTab(document.getElementById("tab-transcript"));
-    status.textContent = "Обработка завершена.";
+    await analyzeCurrentTranscript();
   } catch (exception) {
     status.hidden = true;
     error.textContent = exception instanceof TypeError
@@ -105,10 +195,51 @@ processButton.addEventListener("click", async () => {
       : exception.message;
     error.hidden = false;
   } finally {
-    processing = false;
-    processButton.disabled = !recording;
-    input.disabled = false;
-    document.getElementById("remove-file").disabled = false;
+    setProcessing(false);
+  }
+});
+
+retryAnalysis.addEventListener("click", async () => {
+  if (processing || currentTranscript === null) return;
+  setProcessing(true);
+  try {
+    await analyzeCurrentTranscript();
+  } finally {
+    setProcessing(false);
+  }
+});
+
+exportButton.addEventListener("click", async () => {
+  if (exporting || processing || currentTranscript === null) return;
+  const transcript = currentTranscript;
+  exporting = true;
+  exportButton.disabled = true;
+  exportStatus.textContent = "Создаём DOCX...";
+  exportStatus.hidden = false;
+  try {
+    const response = await fetch("/api/export/docx", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ transcript }),
+    });
+    if (!response.ok) await readResponse(response, "Не удалось создать DOCX.");
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = "meeting-ai-protocol.docx";
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+    if (currentTranscript === transcript) exportStatus.textContent = "Протокол DOCX подготовлен для скачивания.";
+  } catch (exception) {
+    if (currentTranscript === transcript) exportStatus.textContent = exception instanceof TypeError
+      ? "Нет связи с сервером. Повторите экспорт DOCX."
+      : exception.message;
+  } finally {
+    exporting = false;
+    exportButton.disabled = processing || currentTranscript === null || !retryAnalysis.hidden;
   }
 });
 

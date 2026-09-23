@@ -4,15 +4,52 @@ from tempfile import TemporaryDirectory
 from threading import Lock
 
 from fastapi import FastAPI, HTTPException, UploadFile
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from faster_whisper import WhisperModel
+from pydantic import BaseModel, Field
+
+from meeting_analysis import analyze_transcript
+from protocol_export import build_docx
 
 BASE_DIR = Path(__file__).resolve().parent
 app = FastAPI(title="Meeting AI", docs_url=None, redoc_url=None)
 app.mount("/static", StaticFiles(directory=BASE_DIR / "static"), name="static")
 model = None
 model_lock = Lock()
+
+
+class TranscriptRequest(BaseModel):
+    transcript: str = Field(max_length=1_000_000)
+
+
+@app.post("/api/analyze")
+def analyze(request: TranscriptRequest):
+    try:
+        return JSONResponse(
+            analyze_transcript(request.transcript),
+            headers={"Cache-Control": "no-store"},
+        )
+    except Exception as exc:
+        raise HTTPException(500, "Не удалось проанализировать текст. Транскрипт сохранён в интерфейсе.") from exc
+
+
+@app.post("/api/export/docx")
+def export_docx(request: TranscriptRequest):
+    try:
+        content = build_docx(request.transcript, analyze_transcript(request.transcript))
+        return Response(
+            content,
+            media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+            headers={
+                "Content-Disposition": 'attachment; filename="meeting-ai-protocol.docx"',
+                "Cache-Control": "no-store",
+            },
+        )
+    except ImportError as exc:
+        raise HTTPException(503, "Для экспорта установите зависимости из requirements.txt и перезапустите сервер.") from exc
+    except Exception as exc:
+        raise HTTPException(500, "Не удалось создать DOCX. Повторите экспорт; транскрипт сохранён в интерфейсе.") from exc
 
 
 @app.post("/api/transcribe")
