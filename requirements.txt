@@ -3,3 +3,6 @@ uvicorn==0.53.0
 faster-whisper
 python-multipart
 python-docx>=1.2.0,<2
+# Optional at runtime: imported only in the isolated diarization worker.
+pyannote.audio>=4.0.1,<5
+huggingface-hub>=0.28,<2

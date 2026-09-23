@@ -107,15 +107,17 @@ class EndpointTests(unittest.TestCase):
             paths.append(Path(path))
             def segments():
                 self.assertEqual(Path(path).read_bytes(), b"audio")
-                yield SimpleNamespace(text=" Сохранённый транскрипт ")
+                yield SimpleNamespace(text=" Сохранённый транскрипт ", start=0.5, end=4.2)
             return segments(), None
         fake = Mock()
         fake.transcribe.side_effect = transcribe
-        with patch.object(app, "model", fake):
+        with patch.object(app, "model", fake), patch.object(app, "diarize_audio", side_effect=OSError("blocked")):
             for extension in ("mp3", "WAV", "m4a"):
                 response = self.client.post("/api/transcribe", files={"file": ("sample." + extension, b"audio")})
                 self.assertEqual(response.status_code, 200)
-                self.assertEqual(response.json(), {"transcript": "Сохранённый транскрипт"})
+                self.assertEqual(response.json()["transcript"], "Сохранённый транскрипт")
+                self.assertEqual(response.json()["diarization"]["status"], "unavailable")
+                self.assertIsNone(response.json()["segments"][0]["speaker"])
                 self.assertFalse(paths[-1].parent.exists())
             def fail(path, **kwargs):
                 paths.append(Path(path))

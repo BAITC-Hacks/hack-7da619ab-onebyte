@@ -17,6 +17,7 @@ const analysisNote = document.getElementById("analysis-note");
 const exportButton = document.getElementById("export-docx");
 const exportStatus = document.getElementById("export-status");
 const retryAnalysis = document.getElementById("retry-analysis");
+const diarizationStatus = document.getElementById("diarization-status");
 let currentTranscript = null;
 let exporting = false;
 
@@ -40,7 +41,40 @@ function clearAnalysis() {
   exportButton.disabled = true;
   retryAnalysis.hidden = true;
   exportStatus.hidden = true;
+  diarizationStatus.hidden = true;
+  diarizationStatus.textContent = "";
   emptyTasks("Загрузите и обработайте запись, чтобы выделить поручения.");
+}
+
+function formatTimestamp(seconds) {
+  const value = Math.max(0, Math.floor(Number(seconds) || 0));
+  return `${String(Math.floor(value / 60)).padStart(2, "0")}:${String(value % 60).padStart(2, "0")}`;
+}
+
+function renderTranscript(result) {
+  transcriptText.replaceChildren();
+  if (result.diarization?.status === "available" && Array.isArray(result.segments) && result.segments.length) {
+    for (const segment of result.segments) {
+      const block = document.createElement("div");
+      block.className = "speaker-segment";
+      block.dataset.segmentId = String(segment.id);
+      const heading = document.createElement("strong");
+      heading.className = "speaker-label";
+      heading.textContent = `${segment.speaker || "Говорящий не определён"} · ${formatTimestamp(segment.start)}–${formatTimestamp(segment.end)}`;
+      const text = document.createElement("p");
+      text.textContent = segment.text;
+      block.appendChild(heading);
+      block.appendChild(text);
+      transcriptText.appendChild(block);
+    }
+  } else {
+    // Plain transcript remains available even with missing/blocked pyannote.
+    transcriptText.textContent = result.transcript || "Речь в записи не обнаружена.";
+  }
+  diarizationStatus.textContent = result.diarization?.message || "Диаризация недоступна в текущей среде";
+  diarizationStatus.hidden = false;
+  transcriptText.hidden = false;
+  transcriptEmpty.hidden = true;
 }
 
 async function readResponse(response, fallback) {
@@ -182,9 +216,7 @@ processButton.addEventListener("click", async () => {
     if (typeof result?.transcript !== "string") {
       throw new Error("Сервер вернул некорректный результат. Повторите попытку.");
     }
-    transcriptText.textContent = result.transcript || "Речь в записи не обнаружена.";
-    transcriptText.hidden = false;
-    transcriptEmpty.hidden = true;
+    renderTranscript(result);
     currentTranscript = result.transcript;
     activateTab(document.getElementById("tab-transcript"));
     await analyzeCurrentTranscript();

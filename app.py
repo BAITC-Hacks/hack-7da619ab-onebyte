@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 
 from meeting_analysis import analyze_transcript
 from protocol_export import build_docx
+from diarization import diarize_audio, unavailable
 
 BASE_DIR = Path(__file__).resolve().parent
 app = FastAPI(title="Meeting AI", docs_url=None, redoc_url=None)
@@ -86,18 +87,26 @@ def transcribe(file: UploadFile):
                         str(audio_path), beam_size=5, vad_filter=True,
                     )
                     # Inference is lazy: consume all segments before deleting audio.
-                    transcript = "\n".join(
-                        segment.text.strip() for segment in segments
-                        if segment.text.strip()
-                    )
+                    transcript_segments = [
+                        {"start": float(segment.start), "end": float(segment.end),
+                         "text": segment.text.strip()}
+                        for segment in segments if segment.text.strip()
+                    ]
+                    transcript = "\n".join(segment["text"] for segment in transcript_segments)
                 except Exception as exc:
                     raise HTTPException(
                         422,
                         "Не удалось распознать запись. Проверьте, что файл "
                         "не повреждён и содержит аудио, затем повторите попытку.",
                     ) from exc
+            # Keep the original audio alive until the isolated worker exits.
+            # Optional diarization must never turn a successful Whisper result into 500.
+            try:
+                speaker_result = diarize_audio(audio_path, transcript_segments)
+            except Exception:
+                speaker_result = unavailable(transcript_segments, "unexpected_failure")
         return JSONResponse(
-            {"transcript": transcript}, headers={"Cache-Control": "no-store"},
+            {"transcript": transcript, **speaker_result}, headers={"Cache-Control": "no-store"},
         )
     except HTTPException:
         raise
